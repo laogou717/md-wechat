@@ -15,7 +15,7 @@ const KEYS = {
   trash: 'wmd-trash',
   ui: 'wmd-ui',
 }
-const SETTINGS_VERSION = 10
+const SETTINGS_VERSION = 11
 const SAVE_DELAY = 250
 const PREVIEW_MODES = new Set(['full', 'mobile', 'desktop'])
 
@@ -80,6 +80,7 @@ function loadSettings() {
     accentSlotsByTheme: {},
     macCode: true,
     previewWidth: 'full',
+    previewColorMode: 'light',
     editorPct: 50,
     viewMode: 'split',
     galleryMode: 'collage',
@@ -103,6 +104,9 @@ function loadSettings() {
     settings.previewWidth = 'full'
   }
   settings.previewWidth = normalizePreviewMode(settings.previewWidth)
+  if (!['light', 'dark'].includes(settings.previewColorMode)) {
+    settings.previewColorMode = defaults.previewColorMode
+  }
   if (typeof saved.galleryMode !== 'string' || !saved.galleryMode) {
     settings.galleryMode = defaults.galleryMode
   }

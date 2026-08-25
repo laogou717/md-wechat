@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { renderMarkdown, stripPreviewMeta, copyVideoPlaceholder, setImageResolver, setImageAspectProvider } from '../src/lib/renderer.js'
-import { buildStyles, themes } from '../src/lib/themes.js'
+import { buildStyles, colorModeSurface, themes } from '../src/lib/themes.js'
 import { extractUrl } from '../src/lib/imagehost.js'
 
 const galleryMarkdown = `# 多图测试
@@ -25,6 +25,122 @@ test('所有主题都能渲染完整 Markdown', () => {
     assert.match(html, /第一张/)
     assert.doesNotMatch(html, /undefined|null/)
   }
+})
+
+test('LaTeX 公式渲染为自包含、继承主题颜色的微信安全 SVG', () => {
+  const source = `正文公式 $E=mc^2$，金额 $19.9 不应误判。
+
+$$
+\\int_0^1 x^2\\,dx=\\frac{1}{3}
+$$`
+  for (const theme of themes) {
+    const html = renderMarkdown(source, theme, { galleryMode: 'collage' })
+    assert.match(html, /data-math-display="false"/)
+    assert.match(html, /data-math-display="true"/)
+    assert.match(html, /<svg[^>]+viewBox=/)
+    assert.match(html, /(?:fill|stroke)="currentColor"/)
+    assert.match(html, /color:inherit/)
+    assert.doesNotMatch(html, /MJX-SVG-global-cache/)
+    assert.doesNotMatch(html, /<mjx-container/)
+    assert.match(html, /金额 \$19\.9 不应误判/)
+  }
+})
+
+test('公式在强调文字和带背景引用中继承所在节点样式', () => {
+  const html = renderMarkdown(`> **重点 $a^2+b^2=c^2$**`, themes[2], {})
+  assert.match(html, /<blockquote[^>]+background/)
+  assert.match(html, /<strong[^>]+>[\s\S]*data-math-display="false"/)
+  assert.match(html, /<svg[^>]+color:inherit/)
+  assert.doesNotMatch(html, /(?:fill|stroke)="(?:black|#000(?:000)?)"/i)
+})
+
+test('反斜杠公式语法与代码中的美元符号保持正确', () => {
+  const html = renderMarkdown('公式 \\(x+y\\)，代码 `$not_math$`。', themes[0], {})
+  assert.equal((html.match(/data-math-display="false"/g) || []).length, 1)
+  assert.match(html, /<code[^>]*>\$not_math\$<\/code>/)
+})
+
+test('反斜杠圆括号严格行内，方括号严格行间', () => {
+  const inline = renderMarkdown('前文 \\(x+y\\) 后文', themes[0], {})
+  assert.match(inline, /<p[^>]*>前文 <span[^>]*data-math-display="false"/)
+  assert.doesNotMatch(inline, /前文 <br>/)
+  assert.doesNotMatch(inline, /data-math-display="false"[^>]*display:block/)
+
+  const displayBlock = renderMarkdown('\\[x+y=1\\]', themes[0], {})
+  assert.match(displayBlock, /<section[^>]*data-math-display="true"/)
+  assert.doesNotMatch(displayBlock, /data-math-error/)
+
+  const displayAmongText = renderMarkdown('前文 \\[x+y=1\\] 后文', themes[0], {})
+  assert.match(displayAmongText, /<span[^>]*data-math-display="true"/)
+  assert.match(displayAmongText, /data-math-display="true"[^>]*display:block/)
+  assert.doesNotMatch(displayAmongText, /data-math-error/)
+})
+
+test('26 套主题都有独立夜间变体，公式与图片不使用反色滤镜', () => {
+  const source = `# 标题
+
+## 小节
+
+正文 **强调** \\(x^2\\)
+
+> 引用内容
+
+- 列表一
+- 列表二
+
+\\[e^{i\\pi}+1=0\\]
+
+| A | B |
+| --- | --- |
+| 1 | 2 |
+
+\`\`\`js
+const dark = true
+\`\`\`
+
+![图](https://example.com/a.jpg)`
+  const luminance = (hex) => {
+    const values = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255)
+    const [r, g, b] = values.map((c) =>
+      c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4
+    )
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+  }
+  const contrast = (a, b) =>
+    (Math.max(luminance(a), luminance(b)) + 0.05) /
+    (Math.min(luminance(a), luminance(b)) + 0.05)
+
+  for (const theme of themes) {
+    const lightStyles = buildStyles(theme, { colorMode: 'light' })
+    const darkStyles = buildStyles(theme, { colorMode: 'dark' })
+    assert.notEqual(darkStyles.container, lightStyles.container, `${theme.name} 缺少夜间容器变体`)
+    assert.notEqual(colorModeSurface(theme.surface, 'dark'), theme.surface, `${theme.name} 缺少夜间页面底色`)
+    const foreground = darkStyles.container.match(/(?:^|;)color:(#[0-9a-f]{6})/i)?.[1]
+    const background =
+      darkStyles.container.match(/background-color:(#[0-9a-f]{6})/i)?.[1] ||
+      colorModeSurface(theme.surface, 'dark')
+    assert.ok(contrast(foreground, background) >= 7, `${theme.name} 夜间正文对比度不足`)
+
+    const html = renderMarkdown(source, theme, { colorMode: 'dark' })
+    assert.equal((html.match(/data-math-display=/g) || []).length, 2)
+    assert.doesNotMatch(html, /data-math-error/)
+    assert.match(html, /src="https:\/\/example\.com\/a\.jpg"/)
+    assert.doesNotMatch(html, /filter:\s*invert/i)
+    assert.match(html, /currentColor/)
+    assert.match(html, /<blockquote/)
+    assert.match(html, /<table/)
+    assert.match(html, /dark =/)
+    assert.doesNotMatch(html, /undefined|null/)
+  }
+})
+
+test('AMS 公式环境可用，自动编号在整篇重渲染时保持稳定', () => {
+  const source = `$$\\begin{aligned}a&=b+c\\\\d&=e+f\\end{aligned}\\tag{A}$$`
+  const first = stripPreviewMeta(renderMarkdown(source, themes[0], {}))
+  const second = stripPreviewMeta(renderMarkdown(source, themes[0], {}))
+  assert.match(first, /data-math-display="true"/)
+  assert.doesNotMatch(first, /data-math-error/)
+  assert.equal(first, second)
 })
 
 test('原始 HTML 不会作为可执行标签进入预览', () => {

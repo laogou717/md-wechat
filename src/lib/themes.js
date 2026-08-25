@@ -50,6 +50,11 @@ const baseStyles = (p, fs, font) => ({
   caption: `display:block;text-align:center;font-size:0.78em;color:#a1a1aa;margin:-0.5em 0 1.2em;letter-spacing:0.04em;`,
   hr: `border:none;border-top:1px solid #e4e4e7;margin:2em 16px;`,
   code: `font-family:Menlo,Consolas,'Courier New',monospace;font-size:0.86em;background-color:#f2f3f5;color:#c0341d;padding:2px 6px;border-radius:5px;`,
+  // 公式不指定前景色和背景色：currentColor 会继承正文、标题、引用或彩色卡片
+  // 的实际文字色，因此无需为 26 套主题逐个维护深浅色分支。
+  mathInline: `display:inline;color:inherit;text-indent:0;white-space:nowrap;`,
+  mathBlock: `display:block;max-width:100%;margin:1.3em 8px;text-align:center;line-height:1.4;color:inherit;text-indent:0;overflow-x:auto;overflow-y:hidden;`,
+  mathError: `display:inline-block;max-width:100%;padding:0.08em 0.35em;border:1px dashed currentColor;border-radius:4px;color:inherit;font-family:Menlo,Consolas,'Courier New',monospace;font-size:0.86em;line-height:1.5;text-indent:0;`,
   tableWrap: `overflow-x:auto;margin:1.2em 8px;`,
   table: `width:100%;border-collapse:collapse;font-size:0.9em;`,
   th: `border:1px solid #e4e4e7;padding:8px 12px;background-color:${p}14;font-weight:700;text-align:left;`,
@@ -1112,6 +1117,72 @@ const tintOf = (hex, whiteRatio) => mixHex(hex, '#ffffff', whiteRatio)
 const deepenOf = (hex) => mixHex(hex, '#000000', 0.35)
 const escapeReg = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
+function expandHex(hex) {
+  const raw = hex.slice(1)
+  if (raw.length === 3 || raw.length === 4) {
+    return `#${raw
+      .slice(0, 3)
+      .split('')
+      .map((c) => c + c)
+      .join('')}${raw.length === 4 ? raw[3] + raw[3] : ''}`
+  }
+  return hex
+}
+
+function hexLuminance(hex) {
+  const full = expandHex(hex).slice(1, 7)
+  const channels = [0, 2, 4].map((i) => parseInt(full.slice(i, i + 2), 16) / 255)
+  const [r, g, b] = channels.map((c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4))
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b
+}
+
+function mapHexColor(value, mapper) {
+  return value.replace(/#[0-9a-f]{3,4}\b|#[0-9a-f]{6}(?:[0-9a-f]{2})?\b/gi, (hex) => {
+    const full = expandHex(hex)
+    const alpha = full.length === 9 ? full.slice(7) : ''
+    return `${mapper(full.slice(0, 7))}${alpha}`
+  })
+}
+
+function darkBackground(hex) {
+  const lum = hexLuminance(hex)
+  if (lum < 0.08) return mixHex(hex, '#111827', 0.16)
+  if (lum < 0.35) return mixHex(hex, '#101722', 0.48)
+  return mixHex(hex, '#101722', lum > 0.75 ? 0.9 : 0.78)
+}
+
+function darkForeground(hex) {
+  const lum = hexLuminance(hex)
+  if (lum >= 0.62) return hex
+  return mixHex(hex, '#f4f6f8', lum < 0.16 ? 0.86 : 0.62)
+}
+
+function darkBorder(hex) {
+  const lum = hexLuminance(hex)
+  return lum > 0.62 ? mixHex(hex, '#273244', 0.65) : mixHex(hex, '#a9b4c4', 0.38)
+}
+
+function darkStyle(style) {
+  if (typeof style !== 'string' || !style.includes(':')) return style
+  return style.replace(/(^|;)([\w-]+):([^;]*)/g, (whole, prefix, property, value) => {
+    let next = value
+    if (property === 'color' || property === 'fill' || property === 'stroke') {
+      next = mapHexColor(value, darkForeground)
+    } else if (property.startsWith('background')) {
+      next = mapHexColor(value, darkBackground)
+    } else if (property.startsWith('border') || property === 'text-decoration-color') {
+      next = mapHexColor(value, darkBorder)
+    }
+    return `${prefix}${property}:${next}`
+  })
+}
+
+// 日夜模式只用于右侧阅读环境预览。它对每套主题的语义样式逐属性换色，
+// 不反转图片，也不使用整页 filter，因此浅色模板和原生深色模板都保持自身配色气质。
+export function colorModeSurface(surface, mode = 'light') {
+  return mode === 'dark' ? darkBackground(surface || '#ffffff') : surface || '#ffffff'
+}
+
 // 合成最终样式表：基础样式 + 主题覆盖 + 用户自定义覆盖
 export function buildStyles(theme, opts = {}) {
   const p = opts.accent || theme.primary
@@ -1150,6 +1221,15 @@ export function buildStyles(theme, opts = {}) {
   }
 
   const styles = Object.assign(themed, opts.custom || {})
+
+  if (opts.colorMode === 'dark') {
+    for (const key of Object.keys(styles)) {
+      if (typeof styles[key] !== 'string') continue
+      styles[key] = styles[key].includes('style="')
+        ? styles[key].replace(/style="([^"]*)"/g, (_, css) => `style="${darkStyle(css)}"`)
+        : darkStyle(styles[key])
+    }
+  }
 
   // 跨主题的排版安全线：长 token 必须能在当前行断开；列表不应继承引用块
   // 或自定义容器的居中 / 首行缩进，否则 marker 会与正文分离。

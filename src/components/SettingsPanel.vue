@@ -336,6 +336,8 @@ const editableElements = [
   { key: 'strong', name: '加粗' },
   { key: 'a', name: '链接' },
   { key: 'code', name: '行内代码' },
+  { key: 'mathInline', name: '行内公式' },
+  { key: 'mathBlock', name: '块级公式' },
   { key: 'img', name: '图片' },
 ]
 

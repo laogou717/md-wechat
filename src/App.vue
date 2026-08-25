@@ -13,7 +13,12 @@
         <div class="editor-pane" :class="{ 'pane-hidden': viewMode === 'preview' }" :style="editorStyle">
           <Toolbar @cmd="onCmd" />
           <div class="editor-body">
-            <Editor ref="editorRef" v-model="store.md" @scrollline="onEditorScroll" />
+            <Editor
+              ref="editorRef"
+              v-model="store.md"
+              @scrollline="onEditorScroll"
+              @cursorline="onEditorCursor"
+            />
           </div>
           <div class="statusbar">
             <span>{{ charCount }} 字</span>
@@ -43,7 +48,11 @@
 
         <div
           class="preview-pane"
-          :class="[{ 'is-preview-only': viewMode === 'preview' }, `dev-${activePreviewMode.value}`]"
+          :class="[
+            { 'is-preview-only': viewMode === 'preview' },
+            `dev-${activePreviewMode.value}`,
+            `color-${previewColorMode}`,
+          ]"
         >
           <PreviewBar
             :view-mode="viewMode"
@@ -83,7 +92,11 @@
                     aria-hidden="true"
                   />
                   <div class="device-screen" :style="previewScreenStyle">
-                    <div class="wechat-chrome" :data-device="activePreviewMode.value">
+                    <div
+                      class="wechat-chrome"
+                      :data-device="activePreviewMode.value"
+                      :data-color-mode="previewColorMode"
+                    >
                       <div class="wc-title">{{ documentTitle }}</div>
                       <div class="wc-meta">
                         <span class="wc-account">字间排版</span>
@@ -94,7 +107,7 @@
                         ref="previewViewport"
                         class="page"
                         :data-preview-device="activePreviewMode.value"
-                        :style="{ backgroundColor: renderTheme.surface || '#ffffff' }"
+                        :style="previewPageStyle"
                         title="点击任意段落，回到对照模式并定位到对应源码行"
                         @click="onPreviewClick"
                         v-html="html"
@@ -135,7 +148,7 @@ import PreviewBar from './components/PreviewBar.vue'
 import Toolbar from './components/Toolbar.vue'
 import Editor from './components/Editor.vue'
 import { store, theme, notify, docTitle, countChars, restoreDocument, createDocument, importContents, registerImageAspect, getImageAspect, setGalleryOverride, clearGalleryOverride } from './lib/store.js'
-import { themes } from './lib/themes.js'
+import { themes, colorModeSurface } from './lib/themes.js'
 import { renderMarkdown, stripPreviewMeta, copyVideoPlaceholder } from './lib/renderer.js'
 import { copyRichText, copyText } from './lib/clipboard.js'
 import { getImage, blobToDataUrl, getCachedImageEntries } from './lib/imagedb.js'
@@ -185,16 +198,41 @@ function switchDevice(value) {
   }, 170)
 }
 
-const html = computed(() => {
-  store.imageCacheVersion // 图片缓存预热完成后触发重渲染
-  store.aspectVersion // 图片比例学习到新值后重渲染（对齐式画廊）
-  return renderMarkdown(store.md, renderTheme.value, {
+const previewColorMode = computed(() =>
+  store.settings.previewColorMode === 'dark' ? 'dark' : 'light'
+)
+
+function renderOptions(colorMode) {
+  return {
     ...store.settings,
+    colorMode,
     accent: store.settings.accentByTheme?.[renderTheme.value.id] || null,
     slotColors: store.settings.accentSlotsByTheme?.[renderTheme.value.id] || null,
     custom: (store.settings.custom || {})[renderTheme.value.id],
-  })
+  }
+}
+
+const previewPageStyle = computed(() => ({
+  backgroundColor: colorModeSurface(renderTheme.value.surface, previewColorMode.value),
+  colorScheme: previewColorMode.value,
+}))
+
+const html = computed(() => {
+  store.imageCacheVersion // 图片缓存预热完成后触发重渲染
+  store.aspectVersion // 图片比例学习到新值后重渲染（对齐式画廊）
+  return renderMarkdown(store.md, renderTheme.value, renderOptions(previewColorMode.value))
 })
+
+function renderCopyHtml(colorMode = 'light') {
+  const actualTheme = theme.value
+  return renderMarkdown(store.md, actualTheme, {
+    ...store.settings,
+    colorMode: colorMode === 'dark' ? 'dark' : 'light',
+    accent: store.settings.accentByTheme?.[actualTheme.id] || null,
+    slotColors: store.settings.accentSlotsByTheme?.[actualTheme.id] || null,
+    custom: (store.settings.custom || {})[actualTheme.id],
+  })
+}
 const charCount = computed(() => countChars(store.md))
 const readMinutes = computed(() => Math.max(1, Math.ceil(charCount.value / 400)))
 const documentTitle = computed(() => docTitle(store.md))
@@ -270,18 +308,50 @@ function setViewMode(mode) {
 // ---- 编辑/预览同步滚动（按源码行号对齐） ----
 
 let blocks = []
+let previewScroller = null
+let previewScrollRaf = 0
+let editorSyncRaf = 0
+let pendingEditorLine = 0
+let ignorePreviewScrollUntil = 0
+
+function getPreviewScroller() {
+  if (!previewViewport.value) return null
+  return activePreviewMode.value.value === 'full'
+    ? previewViewport.value.closest('.preview-scroll')
+    : previewViewport.value.closest('.device-screen')
+}
+
+function bindPreviewScroller() {
+  const next = getPreviewScroller()
+  if (next === previewScroller) return
+  previewScroller?.removeEventListener('scroll', onPreviewScroll)
+  previewScroller = next
+  previewScroller?.addEventListener('scroll', onPreviewScroll, { passive: true })
+}
 
 function rebuildBlocks() {
   if (!previewViewport.value) return
-  blocks = Array.from(previewViewport.value.querySelectorAll('[data-line]')).map((el) => ({
-    line: Number(el.dataset.line),
-    el,
-  }))
-  // 内容高度变化可能改变"谁是滚动容器"（不满一屏 ↔ 超一屏），滚动缓存作废
-  resetSyncCache()
+  const seen = new Set()
+  blocks = Array.from(previewViewport.value.querySelectorAll('[data-line]'))
+    .map((el) => ({ line: Number(el.dataset.line), el }))
+    .filter(({ line }) => {
+      if (!Number.isFinite(line) || seen.has(line)) return false
+      seen.add(line)
+      return true
+    })
+    .sort((a, b) => a.line - b.line)
+  bindPreviewScroller()
 }
 
-watch(html, () => nextTick(rebuildBlocks))
+// v-html 会替换整篇预览 DOM。更新前记录当前对应的源码位置，更新后按源码位置
+// 恢复，而不是盲目沿用 scrollTop；这样在光标处输入时预览不会跳回文章开头。
+watch(html, () => {
+  const lineSnapshot = previewTopToLine()
+  nextTick(() => {
+    rebuildBlocks()
+    if (Number.isFinite(lineSnapshot)) scrollPreviewToLine(lineSnapshot)
+  })
+})
 
 // 图片比例学习与画廊自动微调：输入停顿 120ms 后再跑，避免每次击键都
 // 触发一轮 DOM 测量与异步等待（外链图未加载时要挂起等待）。
@@ -297,7 +367,6 @@ watch(viewMode, () =>
   nextTick(() => {
     measurePreviewFrame()
     rebuildBlocks()
-    resetSyncCache()
   })
 )
 watch(
@@ -306,69 +375,92 @@ watch(
     nextTick(() => {
       measurePreviewFrame()
       rebuildBlocks()
-      resetSyncCache()
     })
 )
 
-// 找到元素真正的滚动祖先（满屏是外层预览区，样机是设备屏幕）
-function findScroller(el) {
-  let node = el
-  while (node) {
-    const style = getComputedStyle(node)
-    if (/(auto|scroll)/.test(style.overflowY) && node.scrollHeight > node.clientHeight) return node
-    node = node.parentElement
+function blockPositions() {
+  const scroller = previewScroller || getPreviewScroller()
+  if (!scroller || !blocks.length) return []
+  const boxTop = scroller.getBoundingClientRect().top
+  const scale = activePreviewMode.value.value === 'full' ? 1 : previewScale.value || 1
+  let lastTop = 0
+  return blocks.map(({ line, el }) => {
+    const measured = (el.getBoundingClientRect().top - boxTop) / scale + scroller.scrollTop
+    const top = Math.max(lastTop, measured)
+    lastTop = top
+    return { line, top }
+  })
+}
+
+function syncAnchors() {
+  const scroller = previewScroller || getPreviewScroller()
+  if (!scroller) return []
+  const positions = blockPositions()
+  const lastLine = Math.max(0, (editorRef.value?.getLineCount?.() || 1) - 1)
+  const maxTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight)
+  const anchors = [{ line: 0, top: 0 }, ...positions]
+  const tailLine = Math.max(lastLine, anchors.at(-1)?.line || 0)
+  anchors.push({ line: tailLine + 1, top: maxTop + 20 })
+
+  const unique = []
+  for (const anchor of anchors) {
+    const prev = unique.at(-1)
+    if (prev?.line === anchor.line) continue
+    unique.push({ line: anchor.line, top: Math.max(prev?.top || 0, anchor.top) })
   }
-  return null
+  return unique
 }
 
-// 同步滚动的缓存：滚动容器与它的视口位置在布局不变时是常量。
-// 每帧都 findScroller/getComputedStyle/量容器 rect 会强制样式重算与布局，
-// 滚动时 CodeMirror 正在增删虚拟行 DOM，代价尤其高——卡顿的主要来源。
-let syncBox = null
-let syncBoxTop = 0
-
-function resetSyncCache() {
-  syncBox = null
+function interpolate(value, anchors, fromKey, toKey) {
+  if (!anchors.length) return 0
+  if (value <= anchors[0][fromKey]) return anchors[0][toKey]
+  for (let i = 1; i < anchors.length; i++) {
+    const left = anchors[i - 1]
+    const right = anchors[i]
+    if (value > right[fromKey]) continue
+    const span = right[fromKey] - left[fromKey]
+    const ratio = span > 0 ? (value - left[fromKey]) / span : 0
+    return left[toKey] + (right[toKey] - left[toKey]) * ratio
+  }
+  return anchors.at(-1)[toKey]
 }
 
-// 跟随滚动是主线程逐帧重绘，图片多时每帧成本可能超过 16ms。
-// 同步滚动是"行级跳转"而非逐像素，隔帧同步（30fps）视觉无感，
-// 预览每帧渲染预算翻倍，帧率感受显著提升。
-let syncFrame = 0
+function scrollPreviewToLine(line) {
+  const scroller = previewScroller || getPreviewScroller()
+  if (!scroller) return
+  const top = Math.max(0, interpolate(Number(line) || 0, syncAnchors(), 'line', 'top') - 20)
+  if (Math.abs(scroller.scrollTop - top) < 1) return
+  ignorePreviewScrollUntil = performance.now() + 100
+  scroller.scrollTop = top
+}
+
+function previewTopToLine() {
+  const scroller = previewScroller || getPreviewScroller()
+  if (!scroller || !blocks.length) return NaN
+  return interpolate(scroller.scrollTop + 20, syncAnchors(), 'top', 'line')
+}
 
 function onEditorScroll(line) {
-  syncFrame = (syncFrame + 1) % 2
-  if (syncFrame) return
-  if (!blocks.length) return
-  if (!syncBox) {
-    syncBox = findScroller(previewViewport.value)
-    if (!syncBox) return
-    syncBoxTop = syncBox.getBoundingClientRect().top
-  }
-  let lo = 0
-  let hi = blocks.length - 1
-  let ans = -1
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1
-    if (blocks[mid].line <= line) {
-      ans = mid
-      lo = mid + 1
-    } else {
-      hi = mid - 1
-    }
-  }
-  if (ans === -1) {
-    if (syncBox.scrollTop !== 0) syncBox.scrollTop = 0
-    return
-  }
-  const { el } = blocks[ans]
-  const scale = activePreviewMode.value.value === 'full' ? 1 : previewScale.value || 1
-  const top =
-    (el.getBoundingClientRect().top - syncBoxTop) / scale + syncBox.scrollTop - 20
-  const next = Math.max(0, top)
-  // 行级同步：同一行内滚动时目标不变，跳过写入避免无谓重排
-  if (Math.abs(syncBox.scrollTop - next) < 0.5) return
-  syncBox.scrollTop = next
+  pendingEditorLine = Number(line) || 0
+  if (editorSyncRaf) return
+  editorSyncRaf = requestAnimationFrame(() => {
+    editorSyncRaf = 0
+    scrollPreviewToLine(pendingEditorLine)
+  })
+}
+
+function onEditorCursor(line) {
+  pendingEditorLine = Number(line) || 0
+  scrollPreviewToLine(pendingEditorLine)
+}
+
+function onPreviewScroll() {
+  if (performance.now() < ignorePreviewScrollUntil || previewScrollRaf) return
+  previewScrollRaf = requestAnimationFrame(() => {
+    previewScrollRaf = 0
+    const line = previewTopToLine()
+    if (Number.isFinite(line)) editorRef.value?.syncScrollToLine?.(line)
+  })
 }
 
 // 预览点击定位：找到带 data-line 的块，切回对照并把编辑器光标送到对应源码行
@@ -378,13 +470,17 @@ function onPreviewClick(event) {
   if (!block) return
   const line = Number(block.dataset.line)
   if (!Number.isFinite(line)) return
-  if (viewMode.value !== 'split') setViewMode('split')
-  nextTick(() => editorRef.value?.scrollToLine(line))
+  const wasPreviewOnly = viewMode.value !== 'split'
+  if (wasPreviewOnly) setViewMode('split')
+  const jump = () => editorRef.value?.scrollToLine(line)
+  nextTick(() => {
+    requestAnimationFrame(jump)
+    // 从全预览返回对照时编辑栏有 280ms 展开动画；完成后再校准一次。
+    if (wasPreviewOnly) window.setTimeout(jump, 300)
+  })
 }
 
 function measurePreviewFrame() {
-  // 布局变化（窗口缩放、设备切换）后滚动缓存作废
-  resetSyncCache()
   const stage = previewStage.value
   const mode = activePreviewMode.value
   if (!stage || !mode.width || !mode.height) {
@@ -688,14 +784,16 @@ async function replaceLargeVideos(htmlText) {
   return htmlText
 }
 
-async function doCopy() {
+async function doCopy(colorMode = previewColorMode.value) {
   await collectImageAspects()
   await nextTick()
   // 先剥离预览标记、按大小处理视频，再内联 blob 图片（避免处理巨型 base64 字符串）
-  let htmlText = stripPreviewMeta(html.value)
+  const mode = colorMode === 'dark' ? 'dark' : 'light'
+  let htmlText = stripPreviewMeta(renderCopyHtml(mode))
   htmlText = await replaceLargeVideos(htmlText)
   const ok = await copyRichText(await inlineLocalImages(htmlText))
-  notify(ok ? '排版已复制，可以去公众号后台粘贴了' : '复制失败，请手动全选预览内容')
+  const label = mode === 'dark' ? '夜间版' : '白天版'
+  notify(ok ? `${label}排版已复制，可以去公众号后台粘贴了` : '复制失败，请手动全选预览内容')
 }
 
 // 把 HTML 里图片、小视频的 blob: 链接统一还原成 data URI
@@ -711,7 +809,7 @@ async function inlineLocalImages(htmlText) {
 }
 
 async function copySource() {
-  let htmlText = stripPreviewMeta(html.value)
+  let htmlText = stripPreviewMeta(renderCopyHtml(previewColorMode.value))
   htmlText = await replaceLargeVideos(htmlText)
   const ok = await copyText(await inlineLocalImages(htmlText))
   notify(ok ? 'HTML 源码已复制' : '复制失败')
@@ -801,6 +899,9 @@ onBeforeUnmount(() => {
   document.removeEventListener('pointerdown', onGalleryPointerDown)
   document.removeEventListener('dblclick', onGalleryDblClick)
   previewResizeObserver?.disconnect()
+  previewScroller?.removeEventListener('scroll', onPreviewScroll)
+  cancelAnimationFrame(previewScrollRaf)
+  cancelAnimationFrame(editorSyncRaf)
   clearTimeout(mediaPassTimer)
   stopDrag()
 })

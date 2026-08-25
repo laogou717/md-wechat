@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { samples, sample } from '../src/lib/sample.js'
 import { themes } from '../src/lib/themes.js'
+import { renderMarkdown } from '../src/lib/renderer.js'
 
 test('主题库保留 26 套完整主题，且标识与样式均唯一', () => {
   assert.equal(themes.length, 26)
@@ -75,6 +76,8 @@ test('默认样章覆盖常用语法与项目信息', () => {
     /^\d+\. /m, // 有序列表
     /\|.+\|/, // 表格
     /```\w*\n/, // 围栏代码块
+    /\$[^$]+\$/, // 行内公式
+    /^\$\$$/m, // 块级公式
     /!\[.+\]\(.+\)/, // 图片
     /^<video[\s>]/m, // 视频占位写法
     /\[[^\]]+\]\(https?:\/\/[^)]+\)/, // 链接
@@ -94,4 +97,15 @@ test('默认样章包含多种数量的画廊拼贴', () => {
   assert.match(sample, consecutiveThreeImages)
   // 单张图注 + 两图 + 三图 + 四图画廊，共 10 张示例图
   assert.ok((sample.match(/!\[/g) || []).length >= 10)
+})
+
+test('默认样章的公式保留 LaTeX 反斜杠并可正确渲染', () => {
+  assert.match(sample, /\\\(a\^2\+b\^2=c\^2\\\)/)
+  assert.match(sample, /\\int_\{-\\infty\}\^\{\\infty\}/)
+  assert.match(sample, /\\\[\ne\^\{i\\pi\}\+1=0\n\\\]/)
+  assert.doesNotMatch(sample, /[\b\f]/)
+
+  const html = renderMarkdown(sample, themes[0], {})
+  assert.equal((html.match(/data-math-display=/g) || []).length, 4)
+  assert.doesNotMatch(html, /data-math-error/)
 })

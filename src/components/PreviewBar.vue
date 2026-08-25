@@ -29,11 +29,54 @@
       </button>
     </div>
 
+    <div class="seg color-mode-seg" role="group" aria-label="阅读环境">
+      <button
+        v-for="mode in colorModes"
+        :key="mode.value"
+        type="button"
+        :class="{ active: store.settings.previewColorMode === mode.value }"
+        :aria-pressed="store.settings.previewColorMode === mode.value"
+        :title="mode.title"
+        @click="store.settings.previewColorMode = mode.value"
+      >
+        <Icon :name="mode.icon" :size="14" aria-hidden="true" />
+      </button>
+    </div>
+
     <div class="spacer"></div>
 
-    <button class="pcopy" type="button" title="复制排版（⌘⇧C）" @click="$emit('copy')">
-      <Icon name="copy" :size="14" aria-hidden="true" /> 复制富文本
-    </button>
+    <div class="copy-split pmenu-wrap">
+      <button
+        class="pcopy copy-main"
+        type="button"
+        :title="`${currentCopyLabel}（⌘⇧C）`"
+        @click="actCopy(store.settings.previewColorMode)"
+      >
+        <Icon name="copy" :size="14" aria-hidden="true" /> {{ currentCopyLabel }}
+      </button>
+      <button
+        class="copy-more"
+        type="button"
+        aria-label="选择复制版本"
+        :aria-expanded="copyOpen"
+        @click="copyOpen = !copyOpen"
+      >
+        <Icon name="chevron-down" :size="13" aria-hidden="true" />
+      </button>
+      <div v-if="copyOpen" class="pmenu-backdrop" @click="copyOpen = false"></div>
+      <Transition name="pop">
+        <div v-if="copyOpen" class="pmenu copy-menu">
+          <button class="menu-item" type="button" @click="actCopy('light')">
+            <span class="menu-icon"><Icon name="sun" :size="15" aria-hidden="true" /></span>
+            <span class="menu-item-copy"><strong>复制白天版</strong><small>浅色阅读环境与原始模板配色</small></span>
+          </button>
+          <button class="menu-item" type="button" @click="actCopy('dark')">
+            <span class="menu-icon"><Icon name="moon" :size="15" aria-hidden="true" /></span>
+            <span class="menu-item-copy"><strong>复制夜间版</strong><small>深色背景、文字及组件配色</small></span>
+          </button>
+        </div>
+      </Transition>
+    </div>
 
     <div v-if="hostReady" class="pmenu-wrap">
       <button class="pio" type="button" :class="{ open: upOpen }" @click="upOpen = !upOpen">
@@ -141,6 +184,15 @@ const props = defineProps({
 const emit = defineEmits(['change-view', 'copy', 'copy-source', 'restore', 'reset', 'load-sample', 'change-device', 'import', 'export'])
 
 const ioOpen = ref(false)
+const copyOpen = ref(false)
+const currentCopyLabel = computed(() =>
+  store.settings.previewColorMode === 'dark' ? '复制夜间版' : '复制白天版'
+)
+
+function actCopy(mode) {
+  copyOpen.value = false
+  emit('copy', mode === 'dark' ? 'dark' : 'light')
+}
 
 function actIo(name) {
   ioOpen.value = false
@@ -180,6 +232,11 @@ const deviceModes = [
   { value: 'full', icon: 'maximize', title: '满屏（工作区宽度）' },
   { value: 'mobile', icon: 'smartphone', title: '手机（375px）' },
   { value: 'desktop', icon: 'monitor', title: '桌面（677px）' },
+]
+
+const colorModes = [
+  { value: 'light', icon: 'sun', title: '白天阅读模式' },
+  { value: 'dark', icon: 'moon', title: '夜间阅读模式' },
 ]
 
 const menuOpen = ref(false)

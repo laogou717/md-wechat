@@ -3555,6 +3555,38 @@ body {
   transition: all 0.12s ease;
 }
 
+.copy-split {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+.copy-split .copy-main {
+  border-radius: 8px 0 0 8px;
+}
+
+.copy-more {
+  display: inline-grid;
+  width: 26px;
+  height: 30px;
+  padding: 0;
+  place-items: center;
+  color: #ffffff;
+  background: var(--dark);
+  border: 0;
+  border-left: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 0 8px 8px 0;
+  cursor: pointer;
+}
+
+.copy-more:hover,
+.copy-main:hover {
+  background: #3a352c;
+}
+
+.copy-menu {
+  min-width: 238px;
+}
+
 .pcopy:hover {
   background: #3a352c;
   transform: translateY(-1px);
@@ -4483,4 +4515,58 @@ body.gal-dragging {
 .preview-scroll.is-full {
   overflow-y: auto;
   overscroll-behavior: auto;
+}
+
+/* ---------- 微信夜间阅读预览 ---------- */
+/* 只改变右侧阅读环境；文章实际复制结果仍由原始主题输出。模板内部颜色由
+   buildStyles 的语义深色变体处理，这里负责微信页骨架与样机环境。 */
+.preview-pane.color-dark,
+.preview-pane.color-dark .preview-scroll,
+.preview-pane.color-dark .device-screen {
+  background-color: #080b10;
+  background-image: none;
+  color-scheme: dark;
+}
+
+.preview-pane.color-dark .wechat-chrome,
+.preview-pane.color-dark .preview-frame[data-preview-device='full'] .wechat-chrome {
+  background-color: #11151c;
+  border-color: #29303b;
+  box-shadow: 0 10px 30px -14px rgba(0, 0, 0, 0.75);
+}
+
+.preview-pane.color-dark .wc-title {
+  color: #f2f3f5;
+}
+
+.preview-pane.color-dark .wc-meta,
+.preview-pane.color-dark .wc-footer {
+  color: #8d96a3;
+}
+
+.preview-pane.color-dark .wc-account {
+  color: #7da2d8;
+}
+
+.preview-pane.color-dark .wc-footer {
+  border-top-color: #2a3039;
+}
+
+.preview-pane.color-dark .pbar {
+  background: #151a21;
+  border-bottom-color: #2a3039;
+}
+
+.preview-pane.color-dark .pbar .seg {
+  background: #0d1117;
+}
+
+.preview-pane.color-dark .pbar .seg button {
+  color: #9ba5b2;
+}
+
+.preview-pane.color-dark .pbar .seg button.active {
+  color: #f4f6f8;
+  background: #29313d;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
 }

@@ -31,12 +31,13 @@ function hostNotify(baseMsg) {
 const props = defineProps({
   modelValue: { type: String, default: '' },
 })
-const emit = defineEmits(['update:modelValue', 'scrollline'])
+const emit = defineEmits(['update:modelValue', 'scrollline', 'cursorline'])
 
 const el = ref(null)
 let view = null
 let scrollRaf = 0
 let syncingFromModel = false
+let ignoreScrollUntil = 0
 
 // ---- 工具栏命令 ----
 
@@ -427,7 +428,25 @@ function scrollToLine(line) {
   view.focus()
 }
 
-defineExpose({ exec, scrollToLine })
+// 预览拖动时只同步阅读位置，不移动光标、不抢走预览区焦点。
+function syncScrollToLine(line) {
+  if (!view) return
+  const value = Math.max(0, Number(line) || 0)
+  const base = Math.min(Math.floor(value) + 1, view.state.doc.lines)
+  const next = Math.min(base + 1, view.state.doc.lines)
+  const baseBlock = view.lineBlockAt(view.state.doc.line(base).from)
+  const nextBlock = view.lineBlockAt(view.state.doc.line(next).from)
+  const fraction = value - Math.floor(value)
+  const top = baseBlock.top + (nextBlock.top - baseBlock.top) * fraction
+  ignoreScrollUntil = performance.now() + 100
+  view.scrollDOM.scrollTop = Math.max(0, top)
+}
+
+function getLineCount() {
+  return view?.state.doc.lines || 1
+}
+
+defineExpose({ exec, scrollToLine, syncScrollToLine, getLineCount })
 
 // ---- 编辑器初始化 ----
 
@@ -458,6 +477,9 @@ onMounted(() => {
         EditorView.updateListener.of((u) => {
           if (u.docChanged && !syncingFromModel) {
             emit('update:modelValue', u.state.doc.toString())
+          }
+          if (u.selectionSet && !syncingFromModel && u.view.hasFocus) {
+            emit('cursorline', u.state.doc.lineAt(u.state.selection.main.head).number - 1)
           }
         }),
         EditorView.theme({
@@ -511,6 +533,7 @@ onMounted(() => {
       scrollRaf = requestAnimationFrame(() => {
         scrollRaf = 0
         if (!view) return
+        if (performance.now() < ignoreScrollUntil) return
         const block = view.lineBlockAtHeight(view.scrollDOM.scrollTop)
         emit('scrollline', view.state.doc.lineAt(block.from).number - 1)
       })

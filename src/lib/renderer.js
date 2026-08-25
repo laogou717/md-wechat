@@ -53,6 +53,7 @@ const LANGUAGES = {
 for (const [name, register] of Object.entries(LANGUAGES)) hljs.registerLanguage(name, register)
 
 import { buildStyles } from './themes.js'
+import { renderMathSvg, resetMathRenderer } from './mathjax.js'
 
 // highlight.js 类名 -> 内联样式，深浅两套配色（公众号会剥离 <style>，高亮必须内联）。
 const HLJS_DARK = {
@@ -322,7 +323,7 @@ function splitCodeLines(html) {
 
 function createMd(theme, opts) {
   const styles = buildStyles(theme, opts)
-  const chrome = CODE_CHROME[theme.codeTheme] || CODE_CHROME.dark
+  const chrome = opts.colorMode === 'dark' ? CODE_CHROME.dark : CODE_CHROME[theme.codeTheme] || CODE_CHROME.dark
   const macCode = !!opts.macCode
   const galleryMode = normalizeGalleryMode(opts.galleryMode)
   const galleryRatio = normalizeGalleryRatio(opts.galleryRatio).split(':').join('/')
@@ -330,6 +331,138 @@ function createMd(theme, opts) {
   const md = new MarkdownIt({ html: false, linkify: true, breaks: true })
   md.use(markdownItMark) // ==高亮标记==
   const esc = md.utils.escapeHtml
+
+  const renderFormula = (source, display, token, inlineContainer = false) => {
+    const raw = String(source || '').trim()
+    try {
+      const formula = renderMathSvg(raw, display)
+      const tag = display && !inlineContainer ? 'section' : 'span'
+      const style = display ? styles.mathBlock : styles.mathInline
+      return `<${tag}${display && !inlineContainer ? dl(token) : ''} data-math-display="${display ? 'true' : 'false'}" data-math-raw="${escapeHtmlAttr(raw)}" style="${escapeHtmlAttr(style)}">${formula}</${tag}>`
+    } catch {
+      const tag = display && !inlineContainer ? 'section' : 'span'
+      return `<${tag}${display && !inlineContainer ? dl(token) : ''} data-math-error="true" style="${escapeHtmlAttr(
+        `${display ? styles.mathBlock : styles.mathInline}${styles.mathError}`
+      )}">${esc(raw)}</${tag}>`
+    }
+  }
+
+  // ---- LaTeX 公式：$...$ / $$...$$ / \(...\) / \[...\] ----
+  // 块公式必须独占一行；行内美元符号遵循空白边界规则，尽量避免把金额误判为公式。
+  const mathBlock = (state, startLine, endLine, silent) => {
+    const start = state.bMarks[startLine] + state.tShift[startLine]
+    const max = state.eMarks[startLine]
+    const line = state.src.slice(start, max)
+    const trimmed = line.trim()
+    const dollar = trimmed.startsWith('$$')
+    const bracket = trimmed.startsWith('\\[')
+    if (!dollar && !bracket) return false
+
+    const open = dollar ? '$$' : '\\['
+    const close = dollar ? '$$' : '\\]'
+    let content = trimmed.slice(open.length)
+    let nextLine = startLine
+    let closed = false
+
+    const sameLineEnd = content.lastIndexOf(close)
+    if (sameLineEnd >= 0 && !content.slice(sameLineEnd + close.length).trim()) {
+      content = content.slice(0, sameLineEnd)
+      closed = true
+    } else {
+      const lines = [content]
+      while (++nextLine < endLine) {
+        const text = state.src.slice(
+          state.bMarks[nextLine] + state.tShift[nextLine],
+          state.eMarks[nextLine]
+        )
+        const end = text.lastIndexOf(close)
+        if (end >= 0 && !text.slice(end + close.length).trim()) {
+          lines.push(text.slice(0, end))
+          closed = true
+          break
+        }
+        lines.push(text)
+      }
+      content = lines.join('\n')
+    }
+    if (!closed) return false
+    if (silent) return true
+
+    const token = state.push('math_block', '', 0)
+    token.block = true
+    token.content = content.trim()
+    token.map = [startLine, nextLine + 1]
+    state.line = nextLine + 1
+    return true
+  }
+
+  const isEscaped = (src, pos) => {
+    let slashes = 0
+    while (pos - slashes - 1 >= 0 && src[pos - slashes - 1] === '\\') slashes++
+    return slashes % 2 === 1
+  }
+
+  const dollarInline = (state, silent) => {
+    const start = state.pos
+    if (state.src[start] !== '$' || state.src[start + 1] === '$' || isEscaped(state.src, start)) return false
+    const afterOpen = state.src[start + 1]
+    if (!afterOpen || /\s/.test(afterOpen)) return false
+
+    let end = start + 1
+    while ((end = state.src.indexOf('$', end)) >= 0) {
+      if (!isEscaped(state.src, end) && state.src[end + 1] !== '$' && !/\s/.test(state.src[end - 1])) break
+      end++
+    }
+    if (end < 0) return false
+    // 形如 $19.9 或 19$ 的金额不作为公式；公式中至少应含字母、命令或运算符。
+    const content = state.src.slice(start + 1, end)
+    if (/^\d[\d,.]*$/.test(content)) return false
+    if (!silent) {
+      const token = state.push('math_inline', '', 0)
+      token.content = content
+    }
+    state.pos = end + 1
+    return true
+  }
+
+  const bracketInline = (state, silent) => {
+    const start = state.pos
+    if (state.src.slice(start, start + 2) !== '\\(' || isEscaped(state.src, start)) return false
+    let end = state.src.indexOf('\\)', start + 2)
+    while (end >= 0 && isEscaped(state.src, end)) end = state.src.indexOf('\\)', end + 2)
+    if (end < 0) return false
+    if (!silent) {
+      const token = state.push('math_inline', '', 0)
+      token.content = state.src.slice(start + 2, end)
+    }
+    state.pos = end + 2
+    return true
+  }
+
+  // \[...\] 即便与文字写在同一源码行，也保持“行间公式”语义。使用 block 样式的
+  // span 避免在段落内部输出非法 section；独占一行时仍优先由上面的块规则处理。
+  const bracketDisplayInline = (state, silent) => {
+    const start = state.pos
+    if (state.src.slice(start, start + 2) !== '\\[' || isEscaped(state.src, start)) return false
+    let end = state.src.indexOf('\\]', start + 2)
+    while (end >= 0 && isEscaped(state.src, end)) end = state.src.indexOf('\\]', end + 2)
+    if (end < 0) return false
+    if (!silent) {
+      const token = state.push('math_display_inline', '', 0)
+      token.content = state.src.slice(start + 2, end)
+    }
+    state.pos = end + 2
+    return true
+  }
+
+  md.block.ruler.before('fence', 'math_block', mathBlock, { alt: ['paragraph', 'reference', 'blockquote', 'list'] })
+  md.inline.ruler.before('escape', 'math_display_bracket', bracketDisplayInline)
+  md.inline.ruler.before('escape', 'math_inline_bracket', bracketInline)
+  md.inline.ruler.before('escape', 'math_inline_dollar', dollarInline)
+  md.renderer.rules.math_inline = (tokens, idx) => renderFormula(tokens[idx].content, false, tokens[idx])
+  md.renderer.rules.math_display_inline = (tokens, idx) =>
+    renderFormula(tokens[idx].content, true, tokens[idx], true)
+  md.renderer.rules.math_block = (tokens, idx) => renderFormula(tokens[idx].content, true, tokens[idx])
 
   // 同步滚动定位：给块级元素打上源码行号（预览用，复制时会剥离）
   const dl = (token) => (token && token.map ? ` data-line="${token.map[0]}"` : '')
@@ -943,6 +1076,7 @@ export function renderMarkdown(src, theme, opts = {}) {
     normalizeGalleryMode(opts.galleryMode),
     normalizeGalleryRatio(opts.galleryRatio),
     opts.linkFootnotes ? 1 : 0,
+    opts.colorMode === 'dark' ? 'dark' : 'light',
     JSON.stringify(opts.custom || {}),
   ].join('|')
   let entry = cache.get(key)
@@ -956,6 +1090,7 @@ export function renderMarkdown(src, theme, opts = {}) {
     if (cache.size > CACHE_LIMIT) cache.delete(cache.keys().next().value)
   }
   lastThemeStyles = entry.styles
+  resetMathRenderer()
   const env = {}
   const body = entry.md.render(src, env)
   return `<section style="${escapeHtmlAttr(entry.styles.container)}">${body}${buildFootnoteSection(
